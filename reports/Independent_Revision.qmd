@@ -1,0 +1,100 @@
+---
+title: "Independent Structure (Revision)"
+date: today
+author: "Calvin L."
+format:
+  html:
+    theme: litera
+    embed-resources: true 
+    code-fold: true
+    code-tools: true
+    toc: true
+    toc-location: right
+    number-sections: true
+    link-external-newwindow: true
+    link-external-icon: true
+    math: katex
+---
+
+```{r open, warning = F, message = F}
+knitr::opts_chunk$set(warning = T, message = F, fig.align='center', fig.dim=c(10, 6))
+
+# Libraries
+library(qvalue)
+library(tidyverse)
+library(knitr)
+library(patchwork)
+library(mvtnorm)
+library(glue)
+library(future)
+library(furrr)
+library(MASS)
+
+# Functions
+source("simulate.R")
+source("metrics.R")
+source("FDR_bound.R")
+source("dependent_structures.R")
+source("plotter.R")
+```
+
+# Table
+
+```{r}
+set.seed(15)
+
+# Parameters
+n = 1000; M = 500; a = 0.4; b = 4; pi0 = 0.8; params = c(pi0, 0, 1, a, b)
+alpha = 0.1; tau = 0.25; c = 1
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\alpha$={alpha}")
+
+# Table
+res = simulate(n = n, alpha = alpha, tau = tau, params = params, B = M, 
+               structure = "independent", c = c)
+summary_table(res, caption = glue("Independent Structure | Parameters: {params_txt}"))
+```
+
+# Plots
+
+```{r}
+outfile = "rds/independent_rev2.rds"
+alphas = seq(0.01, 0.25, by = 0.01); M = 500
+
+if (file.exists(outfile)) {
+  res = readRDS(outfile)
+} else {
+  res = map_dfr(alphas, function(a) {
+    out = simulate(n = n, alpha = a, tau = tau, params = params, B = M, 
+                   structure = "independent", c = c)
+    out %>% mutate(alpha = a)
+  })
+  saveRDS(res, outfile)
+}
+```
+
+```{r}
+cols = c("FDR_bound" = "#009E73",  # green
+         "Storey"    = "#E69F00",  # orange
+         "BH"        = "#56B4E9",  # sky blue
+         "BY"        = "#CC79A7")  # purple
+
+df = res %>% mutate(Method = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  )
+
+main_txt = "Independent Structure | Empirical FDR vs α"
+power_txt = "Independent Structure | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res)
+
+title_txt1 = "Independent Structure | FDR Bound vs FDP"
+title_txt2 = "Independent Structure | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+

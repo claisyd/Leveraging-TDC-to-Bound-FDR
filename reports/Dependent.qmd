@@ -1,0 +1,1434 @@
+---
+title: "SCDL3992: Dependent Structures Simulations"
+date: today
+author: "Calvin L."
+format:
+  html:
+    theme: litera
+    embed-resources: true 
+    code-fold: true
+    code-tools: true
+    toc: true
+    toc-location: right
+    number-sections: true
+    link-external-newwindow: true
+    link-external-icon: true
+    math: katex
+---
+
+```{r open, warning = F, message = F}
+knitr::opts_chunk$set(warning = T, message = F, fig.align='center', fig.dim=c(10, 6))
+
+# Libraries
+library(qvalue)
+library(tidyverse)
+library(knitr)
+library(patchwork)
+library(mvtnorm)
+library(glue)
+library(future)
+library(furrr)
+library(MASS)
+
+# Functions
+source("simulate.R")
+source("metrics.R")
+source("FDR_bound.R")
+source("dependent_structures.R")
+source("plotter.R")
+
+cols = c("FDR_bound" = "#009E73",  # green
+         "Storey"    = "#E69F00",  # orange
+         "BH"        = "#56B4E9",  # sky blue
+         "BY"        = "#CC79A7")  # purple
+```
+
+# Structure 1: Anti-Pairs
+
+We generate $p$-values such that if one is tiny, the other is huge, so that there is now a strong negative dependence, which will break BH as it relies on PRDS. 
+
+The idea is to take null $Z$ so that $Z_{2k}\approx -Z_{2k-1}$. For each pair of indices $\{2k-1, 2k\}$ draw $G_k\sim\mathcal{N}(0, 1)$ independent across $k$, and fix $\rho\in[0, 1]$. If $\{Z_{2k}, Z_{2k-1}\}$ are both nulls, then we define them as $$\begin{cases}Z_{2k-1}&=\sqrt{\rho}G_k+\sqrt{1-\rho}\cdot \epsilon_{2k-1}\\ Z_{2k}&=-\sqrt{\rho}G_k+\sqrt{1-\rho}\cdot \epsilon_{2k}\end{cases}$$where $\epsilon_k \sim \mathcal{N}(0,1)$ independent over all $k \in [n]$. If one of them is an alternative, set both as independent $\mathcal{N}(0, 1)$ to ensure dependence is only within the nulls. This gives correlation of $-\rho$ and marginals $\mathcal{N}(0, 1)$ for each null. Shift alternatives by $\mu$ and take $p_i=1-\Phi(Z_i)$. 
+
+With $\rho=1$ and both $Z_{2k}, Z_{2k-1}$ are both nulls, then $p_{2k}=1-p_{2k-1}$, a negative dependence which violates PRDS; so it is a good check against BH.
+
+## Plots of Clusters
+
+```{r}
+# Parameters
+set.seed(10)
+n = 10000; pi0 = 0.8; mu_alt = 2
+
+g_anti = generate_p_dependent(n, pi0, mu_alt, "anti_pairs", anti_rho = 0.85)
+df = to_tibble(g_anti, "anti_pairs")
+theme_set(theme_minimal(base_size = 12))
+
+cluster_summaries(df, firstK = 12)
+```
+
+Notes:
+
+- Alternatives pile up at small $p$ because they follow $\mathcal N(\mu, 1)$, so $p$ is stochastically smaller. Nulls are still marginally $\text{U}(0, 1)$.
+- For boxplots, the anti-pair property can be seen more clearly, very small values paired with very large ones.
+- For cluster $z$-scores, there should be around the same number of points above and below $0$. 
+- For the alt rate in cluster, for a cluster size of $2$ we can only get no alts; one alt; two alts; hence the shape.
+
+## Uniformity
+
+```{r}
+set.seed(11)
+M = 20000; n = 1000; rho = 0.85
+title_txt = "Null p-values: Anti-Pairs"
+param_txt = glue("M = {M}, n = {n}, anti-ρ = {rho}")
+
+hist = null_histogram(n = n, M = M, structure = "anti_pairs", 
+               anti_rho = rho, title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+We use the following parameters: $(n, \pi_0, \tau, c, \mu, \rho)=(1000, 0.8, 0.25, 1, 2, 0.95)$, so the correlation is negative and high. We will also use $M=250$ iterations overall. For the table, $\alpha$ is set to be $0.1$.
+
+## Table
+
+```{r}
+set.seed(13)
+
+# Parameters
+n = 1000; pi0 = 0.8; mu = 2.5; rho = 0.95; M = 250; alpha = 0.1
+tau = 0.25; c = 1
+
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\mu$ = {mu}, $\\rho$ = {rho}, $\\alpha$={alpha}")
+
+# Simulation
+resAnti = simulate(n = n, alpha = alpha, tau = tau, params = pi0, B = M, 
+                   structure = "anti_pairs", dep_mu_alt = mu, anti_rho = rho, c = c)
+summary_table(resAnti, caption = glue("Anti-Pairs | Parameters: {params_txt}"))
+```
+
+## Plots
+
+```{r}
+outfile = "rds/anti_pairs.rds"
+alphas = seq(0.01, 0.25, by = 0.01); M = 250
+
+if (file.exists(outfile)) {
+  res_anti = readRDS(outfile)
+} else {
+  res_anti = map_dfr(alphas, function(a) {
+    out = simulate(n = n, alpha = a, tau = tau, params = pi0, B = M, 
+                   structure = "anti_pairs", dep_mu_alt = mu,
+                   anti_rho = rho, c = c)
+    out %>% mutate(alpha = a)
+  })
+  saveRDS(res_anti, outfile)
+}
+```
+
+```{r}
+df = res_anti %>% mutate(Method = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  )
+
+main_txt = "Anti-Pairs | Empirical FDR vs α"
+power_txt = "Anti-Pairs | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, mu = {mu}, anti-ρ = {rho}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_anti)
+title_txt1 = "Anti-Pairs | FDR Bound vs FDP"
+title_txt2 = "Anti-Pairs | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 2: Null Clumps
+
+For a null block $B$, draw a single $U_B\sim\text{U}(0, 1)$ and set $p_i=U_B$ for all nulls in $B$, and alternatives remain the same. Marginally, each null $p_i\sim\text{U}(0, 1)$ but indicators $I_{p_i>\lambda}$ are perfectly correlated within blocks, so Storey's $$\hat{\pi}_0=\dfrac{1}{1-\lambda}\cdot\dfrac1n \sum_{i=1}^n I_{p_i>\lambda}$$ now has a drastically reduced effective sample size and high probability of under-counting the tail when some blocks fall below $\lambda$, so it will underestimate $\pi_0$, hopefully leading to an overshoot of FDR in Storey's procedure.
+
+## Plots of Clusters
+
+```{r}
+# Parameters
+set.seed(1)
+n = 10000; pi0 = 0.8; mu_alt = 2; M = 250
+
+g_clumps = generate_p_dependent(n, pi0, mu_alt, structure = "null_clumps", block_size = 50)
+df = to_tibble(g_clumps, "clumps")
+theme_set(theme_minimal(base_size = 12))
+
+cluster_summaries(df, firstK = 12)
+```
+
+Notes:
+
+- Alternatives pile up at small $p$ (shifted $Z$), while nulls look roughly uniform but with slight “waves” because each null cluster shares a single $p$ level.
+
+- For the $p$ by cluster plot, each null cluster shows up as one horizontal tick (all its $p$’s equal), with tick heights spread across $[0,1]$.
+
+- For the first $400$ $z$-scores by index, nulls appear in horizontal bands at $z=\Phi^{-1}(1-U_b)$ (one band per cluster), while alternatives scatter higher on average.
+
+- For cluster mean $p$ versus alternative rate, null clusters should have alt rate $=0$ and mean $p$ equal to their shared level. The lone dot there is the "cluster" of alts.
+
+## Uniformity
+
+```{r}
+set.seed(12)
+M = 20000; n = 1000; bs = 50
+title_txt = "Null p-values: Null Clumps"
+param_txt = glue("M = {M}, n = {n}, block size = {bs}")
+
+hist = null_histogram(n = n, M = M, structure = "null_clumps", 
+               block_size = bs, title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+We use the following parameters: $(n, \pi_0, \tau, c, \mu)=(1000, 0.8, 0.25, 1, 2)$. We will also use $M=250$ iterations overall. For the table, $\alpha$ is set to be $0.1$.
+
+## Table
+
+```{r}
+set.seed(22)
+n = 1000; pi0 = 0.8; mu = 3; M = 250; alpha = 0.1
+tau = 0.25; c = 1
+
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\mu$ = {mu}, $\\alpha$ = {alpha}")
+
+# Simulation
+resClumps = simulate(n = n, alpha = alpha, tau = tau, params = pi0, B = M,
+                     structure = "null_clumps", dep_mu_alt = mu, c = c)
+summary_table(resClumps, caption = glue("Null Clumps | Parameters: {params_txt}"))
+```
+
+## Plots
+
+```{r}
+outfile = "rds/null_clumps.rds"
+
+alphas = seq(0.01, 0.25, by = 0.01); M = 250; n = 1000
+
+if (file.exists(outfile)) {
+  res_null = readRDS(outfile)
+} else {
+  res_null = map_dfr(alphas, function(a) {
+    out = simulate(n = n, alpha = a, tau = tau, params = pi0, B = M,
+                   structure = "null_clumps", dep_mu_alt = mu, c = c)
+    out %>% mutate(alpha = a)
+  })
+  saveRDS(res_null, outfile)
+}
+```
+
+```{r}
+df = res_null %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  )
+
+main_txt = "Null Clumps | Empirical FDR vs α"
+power_txt = "Null Clumps | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, mu = {mu}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_null)
+title_txt1 = "Null Clumps | FDR Bound vs FDP"
+title_txt2 = "Null Clumps | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 3: Weak and Strong Local Dependence
+
+This is taken from the *RESET* paper section 6.3, simulations 7 and 8. 
+
+- Weak local dependence: blocks of 10 $z$’s; within positions 1–5 have correlation $\rho=+0.25$; between (1–5) and (6–10): $\rho=−0.25$; positions 6–10 independent of the first five; alts shifted by $\mu=2$; $p=1−\Phi(z)$.
+- Strong local dependence: blocks of 5 identical $z$’s (perfect correlation); same shift & p-transform.
+
+```{r}
+# Parameters
+set.seed(1)
+n = 10000; pi0 = 0.8; mu_alt = 2
+
+g_weak   = generate_p_dependent(n, pi0 = pi0, mu_alt = mu_alt,
+                                 structure = "weak_local")
+g_strong = generate_p_dependent(n, pi0 = pi0, mu_alt = mu_alt,
+                                 structure = "strong_local")
+
+df = bind_rows(
+  to_tibble(g_weak,   "weak_local"),
+  to_tibble(g_strong, "strong_local")
+)
+
+theme_set(theme_minimal(base_size = 12))
+
+# plot 1: Overall p distributions by structure, split by null/alt
+p1 = ggplot(df, aes(p, colour = structure, fill = structure)) +
+  geom_density(alpha = 0.15, adjust = 1) +
+  facet_wrap(~is_null, labeller = as_labeller(c(`TRUE`="Nulls", `FALSE`="Alts"))) +
+  labs(title = "p-value density by structure and label", x = "p", y = "density")
+
+# Plot 2: Boxplots
+K = 12
+df_firstK = df %>% group_by(structure) %>% filter(cluster <= K) %>% ungroup()
+
+p2 = ggplot(df_firstK, aes(factor(cluster), p, fill = factor(cluster))) +
+  geom_boxplot(outlier.shape = NA, width = 0.7) +
+  coord_cartesian(ylim = c(0, 1)) +
+  facet_wrap(~structure, ncol = 2) +
+  guides(fill = "none") +
+  labs(title = sprintf("p by cluster (first %d clusters)", K),
+       x = "cluster", y = "p")
+
+# Plot 3: First 400 scores, colour-coded
+df_head = df %>% group_by(structure) %>% slice_head(n = 400) %>% ungroup()
+p3 = ggplot(df_head, aes(i, z, colour = factor(cluster))) +
+  geom_point(size = 1.2, alpha = 0.9) +
+  facet_wrap(~structure, ncol = 1, scales = "free_x") +
+  guides(colour = "none") +
+  labs(title = "First 400 z-scores by index (colored by cluster)",
+       x = "index", y = "z")
+
+# Plot 4: Cluster summaries
+cluster_stats = df %>%
+  group_by(structure, cluster) %>%
+  summarise(mean_p = mean(p), alt_rate = 1 - mean(is_null), .groups = "drop")
+
+p4 = ggplot(cluster_stats, aes(alt_rate, mean_p, colour = structure)) +
+  geom_point(alpha = 0.6) +
+  facet_wrap(~structure, ncol = 2) +
+  labs(title = "Cluster mean p vs alternative rate", x = "alt rate in cluster", y = "mean p")
+
+p1 + p2 + p3 + p4
+```
+
+Notes (Strong Local Dependence):
+
+- p-value density: alternatives pile up near $0$ (shifted $Z$), while nulls are close to uniform; stronger within-block correlation can make the null density look slightly “wavier”.
+- p by cluster: each cluster shows a tight horizontal band (nearly identical $p$ within a block), so the plot has short ticks stacked at different levels.
+- First $400$ $z$-scores by index: points form visible horizontal bands by cluster; alts in a band are shifted upward in $Z$ by $\mu$, so blocks can appear as two nearby bands (null vs alt).
+- Cluster mean $p$ vs alternative rate: as the alt fraction in a cluster increases, the cluster mean $p$ decreases sharply (more small $p$ from shifted alts), giving a steep negative trend.
+
+Notes (Weak Local Dependence):
+
+- p-value density: alternatives still concentrate near $0$; nulls remain roughly uniform with only mild undulation because correlations within blocks are weaker.
+- p by cluster: each cluster shows a wider vertical spread (boxplots with variance) rather than a single tick, reflecting only moderate within-block dependence.
+- First $400$ $z$-scores by index: points remain dispersed inside each cluster color (no single horizontal level); weak correlation yields visibly more scatter than in the strong case.
+- Cluster mean $p$ vs alternative rate: the mean $p$ declines with the alt rate but more gradually, with noticeable dispersion around the trend due to weaker coupling inside blocks.
+
+## Uniformity
+
+```{r}
+set.seed(13)
+M = 20000; n = 1000; mu_alt = 2
+title_txt = "Null p-values: Weak Local"
+param_txt = glue("M = {M}, n = {n}, mu = {mu_alt}")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+               dep_mu_alt = mu_alt, title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+```{r}
+set.seed(14)
+M = 20000; n = 1000; mu_alt = 2
+title_txt = "Null p-values: Strong Local"
+param_txt = glue("M = {M}, n = {n}, mu = {mu_alt}")
+
+hist = null_histogram(n = n, M = M, structure = "strong_local", 
+               dep_mu_alt = mu_alt, title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+We use the following parameters: $(n, \pi_0, \tau, c, \mu)=(1000, 0.8, 0.25, 1, 2)$. We will also use $M=250$ iterations overall. For the table, $\alpha$ is set to be $0.1$.
+
+## Table
+
+```{r}
+set.seed(185)
+n = 1000; pi0 = 0.8; mu = 2; M = 250; alpha = 0.1
+tau = 0.25; c = 1
+
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\mu$ = {mu}, $\\alpha$={alpha}")
+
+resWeak = simulate(n = n, alpha = alpha, tau = tau, params = pi0, B = M,
+                   structure = "weak_local", dep_mu_alt = 2, c = c)
+resStrong = simulate(n = n, alpha = alpha, tau = tau, params = pi0, B = M,
+                   structure = "strong_local", dep_mu_alt = 2, c = c)
+
+summary_table(resWeak, caption = glue("Weak Local | Parameters: {params_txt}"))
+summary_table(resStrong, caption = glue("Strong Local | Parameters: {params_txt}"))
+```
+
+## Plots
+
+```{r}
+outfile = "rds/weak_local.rds"
+alphas = seq(0.01, 0.25, by = 0.01)
+n = 1000; pi0 = 0.8; mu = 2; M = 250
+tau = 0.25; c = 1
+
+if (file.exists(outfile)) {
+  res_weak = readRDS(outfile)
+} else {
+  res_weak = map_dfr(alphas, function(a) {
+    out = simulate(n = n, alpha = a, tau = tau, params = pi0, B = M,
+                   structure = "weak_local", dep_mu_alt = mu, c = c)
+    out %>% mutate(alpha = a)
+  })
+  saveRDS(res_weak, outfile)
+}
+```
+
+```{r}
+df = res_weak %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  )
+
+main_txt = "Weak Local | Empirical FDR vs α"
+power_txt = "Weak Local | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, mu = {mu}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_weak)
+title_txt1 = "Weak Local | FDR Bound vs FDP"
+title_txt2 = "Weak Local | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+```{r}
+outfile = "rds/strong_local.rds"
+alphas = seq(0.01, 0.25, by = 0.01)
+n = 1000; pi0 = 0.8; mu = 2; M = 250
+tau = 0.25; c = 1
+
+if (file.exists(outfile)) {
+  res_strong = readRDS(outfile)
+} else {
+  res_strong = map_dfr(alphas, function(a) {
+    out = simulate(n = n, alpha = a, tau = tau, params = pi0, B = M,
+                   structure = "strong_local", dep_mu_alt = mu, c = c)
+    out %>% mutate(alpha = a)
+  })
+  saveRDS(res_strong, outfile)
+}
+```
+
+```{r}
+df = res_strong %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  )
+
+main_txt = "Strong Local | Empirical FDR vs α"
+power_txt = "Strong Local | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, mu = {mu}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_strong)
+title_txt1 = "Strong Local | FDR Bound vs FDP"
+title_txt2 = "Strong Local | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 4: Mixed-signal Factor
+
+Introduce the latent factor $F\sim\mathcal N(0, \gamma^2)$ with mixed loadings: $$Z_i=F+\epsilon_i,\quad\epsilon_i\sim\mathcal N(0, 1-\gamma^2),\quad \gamma_i\equiv\pm\gamma$$and add $\mu$ for alternatives. Set $p_i=1-\Phi(Z_i)$ as usual. The mixed signals should induce negative dependencies among nulls, which breaks PRDS.
+
+This is because the nulls with positive $\gamma$ follow the common term $F$ and the nulls with negative $\gamma$ go against it. The $\gamma$ for each null is selected randomly with $\mathbb{P}(\gamma)=\mathbb{P}(-\gamma)=1/2$.
+
+## Uniformity
+
+```{r}
+set.seed(15)
+M = 20000; n = 1000; gamma = 0.05
+title_txt = "Null p-values: Mixed Factor"
+param_txt = glue("M = {M}, n = {n}, γ = {gamma}")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_mixfactor(n = n, pi0 = 1, mu_alt = 0, gamma = gamma)},
+                      title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+## Table
+
+```{r}
+set.seed(19)
+M = 250; n = 1000; pi0 = 0.8; tau = 0.25; c = 1
+gamma = 0.9 # failure if larger gamma now ?
+resMix = simulate(n = n, alpha = 0.1, tau = tau, params = pi0, B = M, 
+                  structure = "weak_local", 
+                  .generator = function(n, pi0, mu_alt, ...) {
+                    gen_mixfactor(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+                    })
+params_txt = glue("$n$ = {n}, $\\pi_0$ = {pi0}, $\\mu$ = 2, $M$ = {M}, $\\alpha$ = 0.1, $\\gamma$ = {gamma}")
+summary_table(resMix, caption = glue("Mixed Signal | Parameters: {params_txt}"))
+```
+
+## Plots
+
+### With $\gamma=0.9$
+
+``` {r}
+M = 250; mu = 2.5; gamma = 0.9
+alphas = seq(0.01, 0.25, by = 0.01)
+outfile = "rds/mixfactor_gamma0.9.rds"
+
+if (file.exists(outfile)) {
+  res_mix0.9 = readRDS(outfile)
+} else {
+  res_mix0.9 = do.call(
+    rbind,
+    Map(function(a, j) {
+      simulate(
+        n = n, alpha = a, tau = tau, params = pi0, B = M,
+        structure = "weak_local",     # any dependent tag is fine when using .generator
+        dep_mu_alt = mu,
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_mixfactor(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+        }
+      ) |>
+        mutate(alpha = a)
+    },
+    alphas, seq_along(alphas))
+  )
+  saveRDS(res_mix0.9, outfile)
+}
+```
+
+```{r}
+df = res_mix0.9 %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  )
+
+main_txt = "Mixed Signal | Empirical FDR vs α"
+power_txt = "Mixed Signal | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, mu = {mu}, γ = {gamma}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_mix0.9)
+title_txt1 = "Mixed Signal | FDR Bound vs FDP"
+title_txt2 = "Mixed Signal | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+### With $\gamma=0.05$
+
+```{r}
+gamma = 0.05; M = 250
+outfile = "rds/mixfactor_gamma0.05.rds"
+
+if (file.exists(outfile)) {
+  res_mix0.05 = readRDS(outfile)
+} else {
+  res_mix0.05 = do.call(
+    rbind,
+    Map(function(a, j) {
+      simulate(
+        n = n, alpha = a, tau = tau, params = pi0, B = M,
+        structure = "weak_local",     # any dependent tag is fine when using .generator
+        dep_mu_alt = mu,
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_mixfactor(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+        }
+      ) |>
+        mutate(alpha = a)
+    },
+    alphas, seq_along(alphas))
+  )
+  saveRDS(res_mix0.05, outfile)
+}
+
+df = res_mix0.05 %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  )
+
+main_txt = "Mixed Signal | Empirical FDR vs α"
+power_txt = "Mixed Signal | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, mu = {mu}, γ = {gamma}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_mix0.05)
+
+title_txt1 = "Mixed Signal | FDR Bound vs FDP"
+title_txt2 = "Mixed Signal | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 5: Mirror Pairs
+
+For each null pair $(i, j)$ we set $(p_i, p_j)\approx(U, 1-U)$ uniform. The difference between here and structure 1 is that we "mirror" at the $p$-value level rather than at the $Z$-score level, and *every* null is paired.
+
+## Uniformity
+
+```{r}
+set.seed(16)
+M = 20000; n = 1000; a = 0.4; b = 4
+title_txt = "Null p-values: Mirror Nulls"
+param_txt = glue("M = {M}, n = {n}, alts ~ Beta({a}, {b})")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_mirror_nulls(n = n, pi0 = 1, mu_alt = 0, alt_type = "beta", 
+                                         a = a, b = b)},
+                      title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+## Table
+
+``` {r}
+set.seed(135)
+n = 1000; alpha = 0.1; M = 250; pi0 = 0.8; a = 0.4; b = 4
+tau = 0.25; c = 1
+
+resMirror = simulate(
+  n = n, alpha = alpha, tau = tau, params = pi0, B = M, c = c,
+  structure  = "weak_local",    # any dependent tag is fine when using .generator
+  dep_mu_alt = mu2,             # passes through as mu_alt to the generator
+  .generator = function(n, pi0, mu_alt, ...) {
+    gen_mirror_nulls(n = n, pi0 = pi0, mu_alt = 2, a = 0.4, b = 4, alt_type = "beta") 
+  }
+)
+
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\alpha$ = 0.1, alts ~ Beta({a}, {b})")
+summary_table(resMirror, caption = glue("Mirror Nulls | Parameters: {params_txt}"))
+```
+
+## Plots
+
+```{r}
+alphas  = seq(0.01, 0.25, by = 0.01)
+outfile = "rds/mirror_nulls.rds"
+
+if (file.exists(outfile)) {
+  res_mirror = readRDS(outfile)
+} else {
+  res_mirror = do.call(
+    rbind,
+    Map(function(al, j) {
+      simulate(
+        n = n, alpha = al, tau = tau, params = pi0, B = M, c = c,
+        structure   = "weak_local",   # any dependent tag is fine with .generator
+        dep_mu_alt  = mu2,            # passes through as mu_alt to the generator
+        .generator  = function(n, pi0, mu_alt, ...) {
+          gen_mirror_nulls(n = n, pi0 = pi0, mu_alt = mu_alt,
+                           a = 0.4, b = 4, alt_type = "beta")
+        }
+      )
+    }, alphas, seq_along(alphas))
+  )
+  saveRDS(res_mirror, outfile)
+}
+```
+
+```{r}
+df = res_mirror %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M))
+
+main_txt = "Mirror Nulls | Empirical FDR vs α"
+power_txt = "Mirror Nulls | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, alts ~ Beta({a}, {b})")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+```
+
+Here, FDR bound controls FDR where sometimes Storey does not. Though I think in with this generation method we get FDP = FDR Bound on average:
+
+```{r}
+df = res_mirror %>% res_filter()
+
+title_txt1 = "Mirror Nulls | FDR Bound vs FDP"
+title_txt2 = "Mirror Nulls | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 6: Clayton Copula
+
+We generate null $p$-values from a single Clayton copula with parameter $\theta>0$ over null hypotheses. Let $m_0$ be the number of nulls. Draw a single latent $S \sim \text{Gamma}(1/\theta, 1)$ with shape $1/\theta$ and rate $1$, then for each null index $i$ draw $E_i \stackrel{\text{iid}}{\sim }\text{Exp}(1)$ and set $$U_i=(1+E_i/S)^{-1/\theta}\in (0, 1)$$which are all $\text{iid}$ $\text{Uniform}(0, 1)$ marginally, but note that they are uniform on average across datasets, not within a dataset. Alternatives are generated independently as Beta or normal. 
+
+This leads to stronger clustering of small null $p$-values, leading Storey to fail.
+
+## Uniformity
+
+```{r}
+set.seed(17)
+M = 20000; n = 1000; gamma = 0.05; theta = 5; a = 0.4; b = 4
+title_txt = "Null p-values: Clayton Copula"
+param_txt = glue("M = {M}, n = {n}, theta = {theta}, alts ~ Beta({a}, {b})")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_clayton(n = n, pi0 = 1, mu_alt = 0, alt_type = "beta", 
+                                         a = a, b = b, theta = theta)},
+                      title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+## Table
+
+```{r}
+set.seed(12)
+M = 1000; n = 1000; pi0 = 0.8; alpha = 0.1; mu = 2.8; theta = 5; a = 0.4; b = 4
+tau = 0.1; c = 3
+
+resClayton = simulate(
+  n = n, alpha = alpha, tau = tau, params = pi0, B = M, c = c,
+  structure  = "weak_local",     # any dependent tag is fine with .generator
+  dep_mu_alt = mu,              # passes to generator as mu_alt
+  .generator = function(n, pi0, mu_alt, ...) {
+    gen_clayton(n = n, pi0 = pi0, mu_alt = mu_alt, theta = theta, alt_type = "beta",
+                a = 0.4, b = 4)
+  }
+)
+
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\alpha$ = 0.1, $\\theta$ = 5, alts ~ Beta({a}, {b})")
+summary_table(resClayton, caption = glue("Clayton Copula | Params: {params_txt}"))
+```
+
+Seems like around half the time Storey returns an `NA` value.
+
+## Plots
+
+```{r}
+M = 1000; n = 1000; pi0 = 0.8; mu_alt = 2.8; theta = 5; a = 0.4; b = 4
+tau = 0.1; c = 3
+alphas = seq(0.01, 0.25, by = 0.01)
+outfile = "rds/clayton_sim.rds"
+
+if (file.exists(outfile)) {
+  res_clayton = readRDS(outfile)
+} else {
+  res_clayton = do.call(
+    rbind,
+    Map(function(a, j) {
+      simulate(
+        n = n, alpha = a, tau = tau, params = pi0, B = M, c = c,
+        structure  = "weak_local",   # any dependent tag is fine with .generator
+        dep_mu_alt = mu_alt,
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_clayton(n = n, pi0 = pi0, mu_alt = mu_alt, theta = theta)
+        }
+      )
+    }, alphas, seq_along(alphas))
+  )
+  saveRDS(res_clayton, outfile)
+}
+```
+
+```{r}
+df = res_clayton %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M))
+
+main_txt = "Clayton Copula | Empirical FDR vs α"
+power_txt = "Clayton Copula | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, theta = {theta}, alts ~ Beta({a}, {b})")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+```
+
+Overall, the FDR of Storey is far above the rest including our method. Under Clayton, Storey’s $\hat\pi_0$ is frequently too small due to clustered null $p$’s, inflating FDP without proportionate gains in true discoveries. Slight non-monotonic wiggles in the empirical FDR vs $\alpha$ are due to finite-simulation variability and the discrete nature of the cutoff $m(\alpha)$. 
+
+```{r}
+df = res_clayton
+df = res_filter(df)
+
+title_txt1 = "Clayton Copula | FDR Bound vs FDP"
+title_txt2 = "Clayton Copula | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 7: One Null
+
+We generate a single null $p$-value so that every null is equal; in some sense the limit of the Clayton copula as $\theta\to\infty$, and likely Storey will fail worse here. The alternatives are $\text{Beta}(a, b)$ independently generated.
+
+## Table
+
+```{r}
+set.seed(15)
+n = 1000; pi0 = 0.8; a = 0.4; b = 4; alpha = 0.10; M = 5000
+tau = 0.25; c = 1
+
+resOneNull = simulate(
+  n = n, alpha = alpha, tau = tau, params = pi0, B = M, c = c, 
+  structure  = "weak_local",     # any dependent tag is fine with .generator
+  .generator = function(n, pi0, mu_alt, ...) {
+    gen_one_null(n = n, pi0 = pi0, a = a, b = b)
+  },
+)
+
+params_txt = glue("One Null | Parameters: n = {n}, M = {M}, $\\pi_0$ = {pi0}, $\\alpha$ = {alpha}, alts ~ Beta({a}, {b})")
+summary_table(resOneNull, caption = params_txt)
+```
+
+This time it seems almost all of them give `NA` for Storey.
+
+## Plots
+
+```{r}
+n = 1000; pi0 = 0.8; a = 0.4; b = 4; M = 750
+alphas = seq(0.01, 0.25, by = 0.01)
+outfile = "rds/one_null.rds"
+
+if (file.exists(outfile)) {
+  res_OneNull = readRDS(outfile)
+} else {
+  res_OneNull = do.call(
+    rbind,
+    Map(function(al, j) {
+      simulate(
+        n = n, alpha = al, tau = tau, params = pi0, B = M, c = c, 
+        structure  = "weak_local",     # any dependent tag is fine with .generator
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_one_null(n = n, pi0 = pi0, a = a, b = b)
+        },
+      )
+    }, alphas, seq_along(alphas))
+  )
+  saveRDS(res_OneNull, outfile)
+}
+```
+
+```{r}
+df = res_OneNull %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M))
+
+main_txt = "One Null | Empirical FDR vs α"
+power_txt = "One Null | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, alts ~ Beta({a}, {b})")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+```
+
+```{r}
+df = res_OneNull
+df = res_filter(df)
+
+title_txt1 = "One Null | FDR Bound vs FDP"
+title_txt2 = "One Null | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 8: Equicorrelated Single Factor
+
+This is v2 of Structure 4.
+
+Introduce the latent factor $F\sim\mathcal N(0, \gamma^2)$ and  $$Z_i=F+\epsilon_i,\quad\epsilon_i\sim\mathcal N(0, 1-\gamma^2)$$. Add $\mu$ for alternatives, and set $p_i=1-\Phi(Z_i)$ as usual. The main difference is just that $\gamma$ is one sign now rather than having a positive or negative, so all $p$-values follow with a common factor. We want to see what happens as $\gamma\to1$.
+
+## Uniformity
+
+```{r}
+set.seed(18)
+M = 20000; n = 1000; gamma = 0.95; mu_alt = 2.5
+title_txt = "Null p-values: One Factor"
+param_txt = glue("M = {M}, n = {n}, γ = {gamma}")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_onefactor(n = n, pi0 = 1, mu_alt = 0, 
+                                      gamma = 0.95)},
+                      title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+## Table
+
+```{r}
+# Gamma = 0.05
+set.seed(19)
+M = 250
+gamma = 0.05; pi0 = 0.8; tau = 0.25; c = 1
+resOneFactor = simulate(n = n, alpha = 0.1, tau = tau, params = pi0, B = M, 
+                  structure = "weak_local", 
+                  .generator = function(n, pi0, mu_alt, ...) {
+                    gen_onefactor(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+                    })
+params_txt = glue("$n$ = {n}, $\\pi_0$ = {pi0}, $\\mu$ = 2, $M$ = {M}, $\\alpha$=0.1, $\\gamma$={gamma}")
+summary_table(resOneFactor, caption = glue("One Factor | Parameters: {params_txt}"))
+
+# Gamma = 0.95
+set.seed(22)
+M = 250
+gamma = 0.95
+resOneFactor = simulate(n = n, alpha = 0.1, tau = tau, params = pi0, B = M, 
+                  structure = "weak_local", 
+                  .generator = function(n, pi0, mu_alt, ...) {
+                    gen_onefactor(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+                    })
+params_txt = glue("$n$ = {n}, $\\pi_0$ = {pi0}, $\\mu$ = 2, $M$ = {M}, $\\alpha$=0.1, $\\gamma$={gamma}")
+summary_table(resOneFactor, caption = glue("One Factor | Parameters: {params_txt}"))
+```
+
+It seems like in this scenario, Storey does fail worse as $\gamma\to1$ as claimed.
+
+## Plots
+
+```{r}
+gamma = 0.95
+tau = 0.25; n = 1000; M = 750; pi0 = 0.8; mu_alt = 2
+set.seed(1999); alphas = seq(0.01, 0.25, by = 0.01)
+outfile = "rds/one_factor.rds"
+
+if (file.exists(outfile)) {
+  res_one_factor = readRDS(outfile)
+} else {
+  res_one_factor = do.call(
+    rbind,
+    Map(function(a, j) {
+      simulate(
+        n = n, alpha = a, tau = tau, params = pi0, B = M,
+        structure = "weak_local",     # any dependent tag is fine when using .generator
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_onefactor(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+        }
+      ) |>
+        mutate(alpha = a)
+    },
+    alphas, seq_along(alphas))
+  )
+  saveRDS(res_one_factor, outfile)
+}
+
+df = res_one_factor %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  ) 
+
+main_txt = "One Factor | Empirical FDR vs α"
+power_txt = "One Factor | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, γ = {gamma}, mu = {mu_alt}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_one_factor)
+title_txt1 = "One Factor | FDR Bound vs FDP"
+title_txt2 = "One Factor | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 9: One Factor but Alternatives are Independent
+
+This is v3 of structure 4.
+
+Use the same setup as Structure 8, but the alternatives are independently generated as $\mathcal N(\mu, 1)$. 
+
+## Uniformity
+
+```{r}
+set.seed(18)
+M = 20000; n = 1000; gamma = 0.95; mu_alt = 3
+title_txt = "Null p-values: One Factor With Independent Alts"
+param_txt = glue("M = {M}, n = {n}, γ = {gamma}")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_onefactor(n = n, pi0 = 1, mu_alt = 0, 
+                                      gamma = 0.95)},
+                      title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+## Table
+
+```{r}
+# Gamma = 0.05
+set.seed(19)
+M = 250
+gamma = 0.05; pi0 = 0.8; tau = 0.25; c = 1; mu_alt = 3
+resOneFactorInd = simulate(n = n, alpha = 0.1, tau = tau, params = pi0, B = M, 
+                  structure = "weak_local", 
+                  .generator = function(n, pi0, mu_alt, ...) {
+                    gen_onefactor_ind_alts(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+                    })
+params_txt = glue("$n$ = {n}, $\\pi_0$ = {pi0}, $\\mu$ = {mu_alt}, $M$ = {M}, $\\alpha$=0.1, $\\gamma$={gamma}")
+summary_table(resOneFactorInd, caption = glue("One Factor, Independent Alts | Parameters: {params_txt}"))
+
+# Gamma = 0.95
+set.seed(22)
+M = 250
+gamma = 0.95
+resOneFactorInd = simulate(n = n, alpha = 0.1, tau = tau, params = pi0, B = M, 
+                  structure = "weak_local", 
+                  .generator = function(n, pi0, mu_alt, ...) {
+                    gen_onefactor_ind_alts(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+                    })
+params_txt = glue("$n$ = {n}, $\\pi_0$ = {pi0}, $\\mu$ = 2, $M$ = {M}, $\\alpha$=0.1, $\\gamma$={gamma}")
+summary_table(resOneFactorInd, caption = glue("One Factor, Independent Alts | Parameters: {params_txt}"))
+```
+
+## Plots
+
+```{r}
+gamma = 0.95
+tau = 0.25; n = 1000; M = 750; pi0 = 0.8; mu_alt = 3
+set.seed(2000); alphas = seq(0.01, 0.25, by = 0.01)
+outfile = "rds/one_factor_ind.rds"
+
+if (file.exists(outfile)) {
+  res_one_factor_ind = readRDS(outfile)
+} else {
+  res_one_factor_ind = do.call(
+    rbind,
+    Map(function(a, j) {
+      simulate(
+        n = n, alpha = a, tau = tau, params = pi0, B = M,
+        structure = "weak_local",     # any dependent tag is fine when using .generator
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_onefactor_ind_alts(n = n, pi0 = pi0, mu_alt = mu_alt, gamma = gamma)
+        }
+      ) |>
+        mutate(alpha = a)
+    },
+    alphas, seq_along(alphas))
+  )
+  saveRDS(res_one_factor_ind, outfile)
+}
+
+df = res_one_factor_ind %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  ) 
+
+main_txt = "One Factor, Independent Alts | Empirical FDR vs α"
+power_txt = "One Factor, Independent Alts | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, γ = {gamma}, mu = {mu_alt}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_one_factor_ind)
+title_txt1 = "One Factor, Independent Alts | FDR Bound vs FDP"
+title_txt2 = "One Factor, Independent Alts | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 10: Block equi-correlated negative Gaussian
+
+- Partition indices into blocks of size $b$.
+- Within each block, draw $Z_{block}\sim \mathcal N_b(0,\Sigma_b)$ with $(\Sigma_b)_{ii}=1$ and $(\Sigma_b)_{ij}=\rho$ for $i\neq j$ (take $\rho=-1/(b-1)$ by default).
+- Alternatives are independently generated.
+- One-sided p’s by default.
+
+This causes BH and Storey to fail due to negative dependence, but it still leads to very low **power**, so I am not sure if this works for us. It is sort of like the Anti-pairs case where BH and Storey also failed but that also had initially very low power.
+
+## Uniformity
+
+```{r}
+set.seed(18)
+M = 5000; n = 1000; mu_alt = 2; bs = 20; pi0 = 1
+title_txt = "Null p-values: Negative Block"
+param_txt = glue("M = {M}, n = {n}, block size = {bs}")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_neg_equi_block(n = n, pi0 = pi0, mu_alt = mu, block_size = bs)},
+                      title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+## Table
+
+```{r}
+set.seed(132)
+n = 1000; alpha = 0.1; M = 250; pi0 = 0.95; mu = 4; bs = 20
+tau = 0.25; c = 1
+
+resNegBlock = simulate(
+  n = n, alpha = alpha, tau = tau, params = pi0, B = M, c = c,
+  structure  = "weak_local",    # any dependent tag is fine when using .generator
+  dep_mu_alt = mu,             # passes through as mu_alt to the generator
+  .generator = function(n, pi0, mu_alt, ...) {
+    gen_neg_equi_block(n = n, pi0 = pi0, mu_alt = mu, block_size = bs) 
+  }
+)
+
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\alpha$ = {alpha}, $\\mu$ = {mu}")
+summary_table(resNegBlock, caption = glue("Negative Block | Parameters: {params_txt}"))
+```
+
+## Plots
+
+```{r}
+n = 1000; M = 500; pi0 = 0.95; mu = 4; bs = 20
+tau = 0.25; c = 1
+outfile = "rds/negative_block.rds"
+
+if (file.exists(outfile)) {
+  res_neg_block = readRDS(outfile)
+} else {
+  res_neg_block = do.call(
+    rbind,
+    Map(function(a, j) {
+      simulate(
+        n = n, alpha = a, tau = tau, params = pi0, B = M, c = c,
+        structure  = "weak_local",    # any dependent tag is fine when using .generator
+        dep_mu_alt = mu,             # passes through as mu_alt to the generator
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_neg_equi_block(n = n, pi0 = pi0, mu_alt = mu, block_size = bs) 
+        }
+      ) |>
+        mutate(alpha = a)
+    },
+    alphas, seq_along(alphas))
+  )
+  saveRDS(res_neg_block, outfile)
+}
+
+df = res_neg_block %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  ) 
+
+main_txt = "Negative Block | Empirical FDR vs α"
+power_txt = "Negative Block | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}, mu = {mu_alt}, block size = {bs}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_neg_block)
+title_txt1 = "Negative Block | FDR Bound vs FDP"
+title_txt2 = "Negative Block | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 11: Guo-Rao Worst Case for BH
+
+Based on the 2008 paper by Guo and Rao, this is a pathological example for when BH fails to control FDR, as it is made so that BH attains its upper bound in FDR. It's the only one I can find that seems to work, and the paper claims that the nulls are $U(0, 1)$, however I don't know if this holds for $\alpha$ greater than some point (we need a max $\alpha$ so that the probabilities of the random variable $N$ defined in the paper are positive). Based on the histograms below, it seems that it loses uniformity as $\alpha>\alpha_{\text{max}}$, but is still super-uniform.
+
+One change I made is that the alternatives are independent $\text{Beta}(0.4, 4)$ to improve power, and so that it is more consistent with some of the other structures we had where alts are strictly independent from the nulls. 
+
+## Uniformity
+
+```{r}
+set.seed(133)
+n = 1000; M = 3000; structure = "weak_local"; alpha = 0.1
+
+gen = function(n, ...) gen_guo_rao_worstcase(n = n, pi0 = 1, alpha = alpha)
+
+p = numeric(n * M)
+
+for (m in seq_len(M)) {
+  sm  = generate_p_dependent(n, pi0 = 1, mu_alt = 0,
+                             structure = structure, .generator = gen)
+  idx = ((m - 1L) * n + 1L) : (m * n)   # write into the m-th block
+  p[idx] = sm$p
+}
+# p now has length n*M containing all null p-values in column-major order
+
+# p_null = vector of all true-null p-values you plotted
+N = length(p)
+o = sort(p)
+plot(o, (1:N)/N, type = "l", xlab = "Theoretical U(0,1) quantile", ylab = "Empirical CDF",
+     main = "Guo-Rao Worst Case | Q-Q Plot against U(0, 1)")
+abline(0, 1)  # should hug this line
+
+```
+
+```{r}
+set.seed(18)
+M = 20000; n = 1000; alpha = 0.1; pi0 = 1;
+title_txt = "Null p-values: Guo-Rao Worst Case"
+param_txt = glue("M = {M}, n = {n}, alpha = {alpha}")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_guo_rao_worstcase(n = n, pi0 = pi0, alpha = alpha)},
+                      title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+I think for some larger $\alpha$ the probability that $N=m+1$ will not be positive if we don't truncate $\alpha$ to the maximum value it can take for it to be positive, and that may have led to the nulls not being strictly uniform past this point. For example, the maximum $\alpha$ for $\mathbb P(N=m+1)>0$ is $\approx0.13$ so
+
+```{r}
+set.seed(19)
+alpha = 0.13
+hist1 = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_guo_rao_worstcase(n = n, pi0 = pi0, alpha = alpha)},
+                      title_txt = glue("alpha = {alpha}"), param_txt = NULL)
+
+alpha = 0.15
+hist2 = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_guo_rao_worstcase(n = n, pi0 = pi0, alpha = alpha)},
+                      title_txt = glue("alpha = {alpha}"), param_txt = NULL)
+
+alpha = 0.2
+hist3 = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_guo_rao_worstcase(n = n, pi0 = pi0, alpha = alpha)},
+                      title_txt = glue("alpha = {alpha}"), param_txt = NULL)
+
+alpha = 0.25
+hist4 = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_guo_rao_worstcase(n = n, pi0 = pi0, alpha = alpha)},
+                      title_txt = glue("alpha = {alpha}"), param_txt = NULL)
+
+(hist1 + hist2) / (hist3 + hist4)
+```
+
+## Table
+
+```{r}
+set.seed(144)
+n = 1000; alpha = 0.1; M = 250; pi0 = 0.8
+tau = 0.25; c = 1
+
+resGuoRao = simulate(
+  n = n, alpha = alpha, tau = tau, params = pi0, B = M, c = c,
+  structure  = "weak_local",    # any dependent tag is fine when using .generator
+  dep_mu_alt = mu,             # passes through as mu_alt to the generator
+  .generator = function(n, pi0, mu_alt, ...) {
+    gen_guo_rao_worstcase(n = n, pi0 = pi0, alpha = alpha) 
+  }
+)
+
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\alpha$ = {alpha}")
+summary_table(resGuoRao, caption = glue("Guo-Rao Worst Case | Parameters: {params_txt}"))
+```
+
+## Plots
+
+```{r}
+n = 1000; M = 1000; pi0 = 0.8
+tau = 0.25; c = 1
+alphas = seq(0.01, 0.25, 0.01)
+# outfile = "rds/guo_rao_v1.rds"
+outfile = "rds/guo_rao_v1_2.rds"
+
+if (file.exists(outfile)) {
+  res_guo_rao = readRDS(outfile)
+} else {
+  res_guo_rao = do.call(
+    rbind,
+    Map(function(a, j) {
+      simulate(
+        n = n, alpha = a, tau = tau, params = pi0, B = M, c = c,
+        structure  = "weak_local",    # any dependent tag is fine when using .generator
+        dep_mu_alt = mu,             # passes through as mu_alt to the generator
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_guo_rao_worstcase(n = n, pi0 = pi0, alpha = a) 
+        }
+      ) |>
+        mutate(alpha = a)
+    },
+    alphas, seq_along(alphas))
+  )
+  saveRDS(res_guo_rao, outfile)
+}
+
+df = res_guo_rao %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  ) 
+
+main_txt = "Guo Rao Worst Case | Empirical FDR vs α"
+power_txt = "Guo Rao Worst Case | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_guo_rao)
+title_txt1 = "Guo Rao Worst Case | FDR Bound vs FDP"
+title_txt2 = "Guo-Rao Worst Case | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
+# Structure 12: Guo-Rao with Independent Alternatives
+
+This is an alternative with independent alternatives, though actually I realised that my approach already uses that. Regardless, I will implement it here.
+
+The main differences seems to be that this one would stop if the probability
+
+$$
+p=1-\left\{\dfrac{m_1}{m}+\dfrac{m_0}{m}\displaystyle{\sum_{j=1}^{m_0}}\ \dfrac{1}{j}\right\}\alpha<0 \iff \alpha> \alpha_{\text{max}}:=\left\{\dfrac{m_1}{m}+\dfrac{m_0}{m}\displaystyle{\sum_{j=1}^{m_0}}\ \dfrac{1}{j}\right\}^{-1}
+$$
+
+and my approach was to instead set $p$ at $\alpha_{\text{max}}$ which I suspect is the reason for the non-uniformity for larger $\alpha$.
+
+Another difference is the alternatives are just all zero but in mine I had them as $\text{Beta}(0.4, 4)$.
+
+## Uniformity
+
+Using a Q-Q plot:
+
+```{r}
+set.seed(1)
+n = 1000; M = 750; structure = "weak_local"; alpha = 0.1
+
+gen = function(n, ...) gen_guo_rao_2(n = n, pi0 = 1, alpha = alpha)
+
+p = numeric(n * M)
+
+for (m in seq_len(M)) {
+  sm  = generate_p_dependent(n, pi0 = 1, mu_alt = 0,
+                             structure = structure, .generator = gen)
+  idx = ((m - 1L) * n + 1L) : (m * n)   # write into the m-th block
+  p[idx] = sm$p
+}
+# p now has length n*M containing all null p-values in column-major order
+
+# p_null = vector of all true-null p-values you plotted
+N = length(p)
+o = sort(p)
+plot(o, (1:N)/N, type = "l", xlab = "Theoretical U(0,1) quantile", ylab = "Empirical CDF",
+     main = "Guo-Rao v2 | Q-Q Plot against U(0, 1)")
+abline(0, 1)  # should hug this line
+```
+
+```{r}
+set.seed(18)
+M = 20000; n = 1000; alpha = 0.1; pi0 = 1
+title_txt = "Null p-values: Guo-Rao Worst Case 2"
+param_txt = glue("M = {M}, n = {n}, alpha = {alpha}")
+
+hist = null_histogram(n = n, M = M, structure = "weak_local", 
+                      .generator = function(n, ...) {
+                        gen_guo_rao_2(n = n, pi0 = pi0, alpha = alpha)},
+                      title_txt = title_txt, param_txt = param_txt)
+hist
+```
+
+Looks quite similar to what I had originally. We can compute $\alpha_{\text{max}}$ as $\approx 0.134$ so past this point it should stop generating.
+
+```{r}
+m0 = 1000; m1 = 0; m = m0
+H_m0 = harmonic(m0)
+alpha_max = 1 / ( (m1/m) + (m0/m)*H_m0 )
+glue("Max alpha we can take: α = {round(alpha_max, 4)}, given all nulls.")
+```
+
+## Table
+
+```{r}
+set.seed(144)
+n = 1000; alpha = 0.1; M = 250; pi0 = 0.8
+tau = 0.25; c = 1
+
+resGuoRao2 = simulate(
+  n = n, alpha = alpha, tau = tau, params = pi0, B = M, c = c,
+  structure  = "weak_local",    # any dependent tag is fine when using .generator
+  dep_mu_alt = mu,             # passes through as mu_alt to the generator
+  .generator = function(n, pi0, mu_alt, ...) {
+    gen_guo_rao_2(n = n, pi0 = pi0, alpha = alpha) 
+  }
+)
+
+params_txt = glue("$n$ = {n}, $M$ = {M}, $\\pi_0$ = {pi0}, $\\alpha$ = {alpha}")
+summary_table(resGuoRao2, caption = glue("Guo-Rao Worst Case 2 | Parameters: {params_txt}"))
+```
+
+## Plots
+
+First, we find the largest $\alpha$ which the function can take, which I found to be 0.16.
+
+```{r}
+n = 1000; M = 750; pi0 = 0.8
+tau = 0.25; c = 1
+alphas = seq(0.01, 0.16, 0.01)
+
+outfile = "rds/res_guo_rao_v2.rds"
+
+if (file.exists(outfile)) {
+  res_guo_rao2 = readRDS(outfile)
+} else {
+  res_guo_rao2 = do.call(
+    rbind,
+    Map(function(a, j) {
+      simulate(
+        n = n, alpha = a, tau = tau, params = pi0, B = M, c = c,
+        structure  = "weak_local",    # any dependent tag is fine when using .generator
+        dep_mu_alt = mu,             # passes through as mu_alt to the generator
+        .generator = function(n, pi0, mu_alt, ...) {
+          gen_guo_rao_2(n = n, pi0 = pi0, alpha = a) 
+        }
+      ) |>
+        mutate(alpha = a)
+    },
+    alphas, seq_along(alphas))
+  )
+  saveRDS(res_guo_rao2, outfile)
+}
+
+df = res_guo_rao2 %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(M),
+    Power_mcse = Power_sd / sqrt(M)
+  ) 
+
+main_txt = "Guo Rao Worst Case 2 | Empirical FDR vs α"
+power_txt = "Guo Rao Worst Case 2 | Power vs α"
+params_txt = glue("n = {n}, M = {M}, π0 = {pi0}")
+fdp_plot(df, main_txt, params_txt)
+power_plot(df, power_txt, params_txt)
+
+df = res_filter(res_guo_rao2)
+
+title_txt1 = "Guo Rao Worst Case 2 | FDR Bound vs FDP"
+title_txt2 = "Guo Rao Worst Case 2 | Average FDR Bound - Average FDP"
+params_txt = params_txt
+bound_fdp_plot(df, title_txt1, params_txt)
+gap_plot(df, title_txt2)
+```
+
