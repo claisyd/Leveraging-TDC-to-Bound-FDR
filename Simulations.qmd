@@ -1,0 +1,1271 @@
+---
+title: "SCDL3992: Independent Simulations"
+date: today
+author: "Calvin L."
+format:
+  html:
+    theme: litera
+    embed-resources: true 
+    code-fold: true
+    code-tools: true
+    toc: true
+    toc-location: right
+    number-sections: true
+    link-external-newwindow: true
+    link-external-icon: true
+    math: katex
+---
+
+```{r open, warning = F, message = F}
+knitr::opts_chunk$set(warning = F, message = F, fig.align='center', fig.dim=c(10, 6))
+
+# Libraries
+library(qvalue)
+library(tidyverse)
+library(knitr)
+library(patchwork)
+library(mvtnorm)
+library(glue)
+library(future)
+library(furrr)
+
+# Functions
+source("simulate.R")
+source("metrics.R")
+source("FDR_bound_new.R")
+```
+
+# Average FDR vs FDP
+
+Take $M=1000$ iterations, $n=1000$ sample size, $\pi_0=0.8$, $\alpha=\{0.01, 0.05, 0.1, 0.2\}$ for now, $\tau=0.25$ and $c=1$.
+
+```{r FDR_FDP-gen}
+# Parameters
+B = 1000
+n = 1000
+pi0 = 0.8
+params = c(0.8, 0, 1, 0.4, 4)
+alpha = c(0.01, 0.05, 0.1, 0.2)
+tau = 0.25
+c = 1
+
+outfile = "rds/FDP_FDR1.rds"
+
+if (file.exists(outfile)) {
+  obj = readRDS(outfile)
+  FDR = obj$FDR
+  FDP = obj$FDP
+} else {
+  # pre-allocate
+  FDR = matrix(NA_real_, nrow = B, ncol = length(alpha))
+  FDP = matrix(NA_real_, nrow = B, ncol = length(alpha))
+  colnames(FDR) = as.character(alpha)
+  colnames(FDP) = as.character(alpha)
+
+  # simulate
+  for (i in seq_len(B)) {
+    sim   = generate_p(n = n, p = pi0, seed = i,
+                       u_min = 0, u_max = 1, beta_a = 0.4, beta_b = 4)
+    p     = sim$p
+    nulls = sim$is_null
+
+    for (j in seq_along(alpha)) {
+      res = metrics_FDR_bound(p, alpha[j], tau, nulls, c = c)
+      FDP[i, j] = res$FDP
+      FDR[i, j] = res$FDR_bound_raw   # raw bound-estimator at cutoff
+    }
+  }
+
+  saveRDS(
+    list(
+      FDR = FDR,
+      FDP = FDP,
+      meta = list(B = B, n = n, pi0 = pi0, alpha = alpha, tau = tau, c = c)
+    ),
+    outfile
+  )
+}
+```
+
+We want to check if the average FDR bound is greater than the average FDP.
+
+```{r table-averages}
+# Take col means
+FDR_means = colMeans(FDR)
+FDP_means = colMeans(FDP)
+colnames(FDP) = colnames(FDR) = sprintf("%.2f", alpha)
+
+# Display table
+df = data.frame("FDR" = FDR_means, "FDP" = FDP_means) %>% 
+  mutate(FDR = round(FDR, 5), FDP = round(FDP, 5)) %>% rename("FDR Bound" = "FDR")
+
+kable(df, align = "ccc", caption = "Average FDR Bound vs Average FDP")
+```
+
+## Box Plot of Differences
+
+```{r box-diff}
+diff = FDR - FDP
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+alpha_labels = c("0.01", "0.05", "0.1", "0.2")
+stopifnot(ncol(diff) == length(alpha_labels))
+
+df_diff = data.frame(
+  value = as.vector(diff),
+  alpha = factor(rep(alpha_labels, each = nrow(diff)), levels = alpha_labels)
+)
+
+p_diff = ggplot(df_diff, aes(x = "", y = value)) +
+  geom_boxplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", linewidth = 0.6, color = "red") +
+  facet_wrap(~ alpha, nrow = 1) +
+  labs(
+    title = "Difference between Average FDR_bound and FDP",
+    subtitle = glue("parameters = {params_txt}, n = {n}, tau = {tau}, c = {c}, M = {B}"),
+    x = NULL,
+    y = "Difference (FDR_bound - FDP)"
+  ) +
+  theme_linedraw(base_size = 13)
+
+p_diff
+```
+
+## Plot of FDR Bound against FDP
+
+Line plots of FDR Bound (raw) vs FDP.
+
+```{r alpha-gen}
+alphas = seq(0.01, 0.99, by = 0.01)
+iters = 100
+
+outfile = "rds/FDP_FDR2.rds"
+
+if (file.exists(outfile)) {
+  obj = readRDS(outfile)
+  FDR = obj$FDR
+  FDP = obj$FDP
+} else {
+  # Pre-allocate
+  FDR = matrix(NA_real_, nrow = iters, ncol = length(alphas))
+  FDP = matrix(NA_real_, nrow = iters, ncol = length(alphas))
+  colnames(FDR) = as.character(alphas)
+  colnames(FDP) = as.character(alphas)
+
+  for (i in seq_len(iters)) {
+    sim   = generate_p(n = n, p = pi0, seed = i)
+    p     = sim$p
+    nulls = sim$is_null
+
+    tmp = lapply(alphas, function(a) metrics_FDR_bound(p, a, tau, nulls, c = c))
+    FDP[i, ] = vapply(tmp, function(x) x$FDP,     numeric(1))
+    FDR[i, ] = vapply(tmp, function(x) x$FDR_bound_raw, numeric(1))
+  }
+
+  saveRDS(
+    list(
+      FDR = FDR,
+      FDP = FDP,
+      meta = list(B = B, n = n, pi0 = pi0, tau = tau, c = c, alphas = alphas)
+    ),
+    outfile
+  )
+}
+```
+
+```{r FDR_FDP-plot}
+df = data.frame(alpha = alphas, FDP_mean = colMeans(FDP, na.rm = TRUE),
+                FDR_bound_mean = colMeans(FDR, na.rm = TRUE))
+
+df = subset(df, alpha <= 0.25)
+
+ggplot(df, aes(x = alpha)) +
+  geom_line(aes(y = FDR_bound_mean, linetype = "FDR_bound", color = "FDR_bound"), linewidth = 1) +
+  geom_line(aes(y = FDP_mean,        linetype = "FDP",        color = "FDP"),        linewidth = 1) +
+  scale_linetype_discrete(name = "Metric") +
+  scale_color_manual(
+    name = "Metric",
+    values = c("FDR_bound" = "#009E73",  # green
+               "FDP"        = "#D55E00") # orange
+  ) +
+  labs(x = expression(alpha), y = "Average FDR Bound / FDP",
+       title = glue("FDR bound vs FDP across α"), 
+       subtitle = glue("parameters = {params_txt}, n = {n}, tau = {tau}, c = {c}, M = {B}")) +
+  theme_linedraw() +
+  guides(linetype = "none", color = guide_legend(title = "Metric"))
+```
+
+# Simulations
+
+The goal is to simulate and test different levels of $\tau, c, n, B$ as below and conclude with a plot of Power and number of discoveries (against BH, Storey and BY). When testing a parameter, the rest use the default setting, for a reasonable run-time I had to keep default iterations to $B=100$. 
+
+| Parameter/Test        | Default     | Sim Values        |
+| --------------------- | ----------- | ----------------- |
+| $\tau$                | 0.25        | 0.1, 0.175, 0.25  |
+| $c$                   | 1           | 0, 0.5, 1, 2      |
+| Sample Size $n$       | 1000        | 1000, 5000, 10000 |
+| Iterations            | 100         | 100, 500, 1000    |
+| FDR                   | (use above) |                   |
+| Power                 | (use above) |                   |
+| Number of discoveries | (use above) |                   |
+
+The data generation parameters stay the same as $(\pi_0, u_1, u_2, a, b)=(0.8, 0, 1, 0.4, 4)$ and $\alpha$ goes from $0.01\to0.99$ over each simulation.
+
+To help save run time and see the trade-offs and differences between different values of a particular parameter, I will plot the three different parameter values on the same plot but just for `FDR_bound`, then later on I will include the last three with reference to BH, BY, and Storey.
+
+```{r default-settings}
+# Default parameters
+n = 1000
+params = c(0.8, 0, 1, 0.4, 4)
+tau = 0.25
+c = 1
+alphas  = seq(0.01, 0.99, by = 0.01)
+iters = 100
+seed0 = 1L
+```
+
+## $\tau$ Simulation
+
+```{r tau-results, warning = F, message = F}
+taus = c(0.1, 0.175, 0.25)
+
+# Use all but one core
+future::plan(multisession, workers = max(1, parallel::detectCores() - 1))
+outfile = "rds/tau_sim.rds"
+
+if (file.exists(outfile)) {
+  res_alpha = readRDS(outfile)
+} else {
+  res_alpha = future_map2_dfr(
+    alphas, seq_along(alphas),
+    ~{
+      map_dfr(taus, function(tt) {
+        out = simulate(
+          n, alpha = .x, tau = tt, params = params, B = iters,
+          seed.offset = seed0 + .y, structure = "ind"
+        )
+        dplyr::mutate(out, alpha = .x, tau = tt)
+      })
+    },
+    .options = furrr::furrr_options(seed = TRUE)
+  )
+  saveRDS(res_alpha, outfile)
+}
+
+# Keep only FDR_bound + compute MC SEs (uses iters replicates)
+df_tau = res_alpha %>%
+  dplyr::filter(Method == "FDR_bound") %>%
+  dplyr::mutate(
+    FDP_mcse   = FDP_sd   / sqrt(iters),
+    Power_mcse = Power_sd / sqrt(iters)
+  ) %>%   mutate(
+    tau_f = factor(
+      tau,
+      levels = sort(unique(tau)),
+      labels = paste0("τ = ", sort(unique(tau)))
+    )
+  )
+
+```
+
+```{r tau-plot}
+df_tau = subset(df_tau, alpha <= 0.25)
+# Color palette mapped to the τ factor levels (color-blind friendly)
+tau_levels = levels(df_tau$tau_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00")  # blue/green/orange
+cols_tau = setNames(base_cols[seq_along(tau_levels)], tau_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+fdr_tau = ggplot(df_tau, aes(x = alpha, y = FDP_mean, color = tau_f, fill = tau_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(0, FDP_mean - FDP_mcse),
+        ymax = pmin(1, FDP_mean + FDP_mcse)),
+    alpha = 0.12, color = NA
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 1) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "τ", values = cols_tau) +
+  scale_fill_manual(name = "τ", values = cols_tau) +
+  labs(
+    title = glue("Independent p-values | τ Simulations"),
+    x = expression(alpha),
+    y = "Empirical FDR",
+    color = "τ", fill = "τ",
+    subtitle = "FDR vs α",
+  ) +
+  theme_linedraw(base_size = 13) + theme(legend.position = "none")
+
+# Power
+
+power_tau = ggplot(df_tau, aes(x = alpha, y = Power_mean, color = tau_f, fill = tau_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(0, Power_mean - Power_mcse),
+        ymax = pmin(1, Power_mean + Power_mcse)),
+    alpha = 0.12, color = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "τ", values = cols_tau) +
+  scale_fill_manual(name = "τ", values = cols_tau) +
+  labs(
+    title = NULL,
+    x = expression(alpha),
+    y = "Power",
+    color = "τ", fill = "τ",
+    subtitle = "Power vs α"
+  ) +
+  theme_linedraw(base_size = 13)
+
+tau_sim = fdr_tau + power_tau
+```
+
+## $c$ Simulation
+
+```{r c-results}
+tau = 0.25 # default
+cs = c(0, 0.5, 1, 2)
+
+outfile = "rds/c_sim.rds"
+future::plan(multisession, workers = max(1, parallel::detectCores() - 1))
+
+if (file.exists(outfile)) {
+  res_alpha = readRDS(outfile)
+} else {
+  res_alpha = furrr::future_map2_dfr(
+    alphas, seq_along(alphas),
+    ~{
+      purrr::map_dfr(cs, function(cc) {
+        out = simulate(
+          n, alpha = .x, tau = tau, params = params, B = iters,
+          c = cc, seed.offset = seed0 + .y, structure = "ind"
+        )
+        dplyr::mutate(out, alpha = .x, c = cc)
+      })
+    },
+    .options = furrr::furrr_options(seed = TRUE)
+  )
+  saveRDS(res_alpha, outfile)
+}
+
+# tidy
+df = res_alpha %>%
+  dplyr::filter(Method == "FDR_bound") %>%
+  dplyr::mutate(
+    FDP_mcse   = FDP_sd   / sqrt(iters),
+    Power_mcse = Power_sd / sqrt(iters)
+  )
+```
+
+```{r c-plot}
+df_c = res_alpha %>%
+  filter(Method == "FDR_bound") %>%
+  mutate(
+    FDP_mcse   = FDP_sd   / sqrt(iters),
+    Power_mcse = Power_sd / sqrt(iters),
+    c_f = factor(
+      c,
+      levels = sort(unique(c)),
+      labels = paste0("c = ", sort(unique(c)))
+    )
+  )
+
+df_c_zoomed = subset(df_c, alpha <= 0.25)
+
+# palette for c levels
+c_levels = levels(df_c_zoomed$c_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00", "slateblue")
+cols_c = setNames(base_cols[seq_along(c_levels)], c_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+fdr_c = ggplot(df_c_zoomed, aes(x = alpha, y = FDP_mean, color = c_f, fill = c_f, group = c_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(0, FDP_mean - FDP_mcse),
+        ymax = pmin(1, FDP_mean + FDP_mcse)),
+    alpha = 0.12, color = NA
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 1) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "c", values = cols_c) +
+  scale_fill_manual(name = "c", values = cols_c) +
+  labs(
+    title = glue("Independent p-values | c Simulations"),
+    x = expression(alpha),
+    y = "Empirical FDR",
+    color = "c", fill = "c",
+    subtitle = "FDR vs α"
+  ) +
+  theme_linedraw(base_size = 13) + theme(legend.position = "none")
+
+# Power
+
+power_c = ggplot(df_c_zoomed, aes(x = alpha, y = Power_mean, color = c_f, fill = c_f, group = c_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(0, Power_mean - Power_mcse),
+        ymax = pmin(1, Power_mean + Power_mcse)),
+    alpha = 0.12, color = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "c", values = cols_c) +
+  scale_fill_manual(name = "c", values = cols_c) +
+  labs(
+    title = NULL,
+    x = expression(alpha),
+    y = "Power",
+    color = "c", fill = "c",
+    subtitle = "Power vs α"
+  ) +
+  theme_linedraw(base_size = 13)
+
+c_sim = fdr_c + power_c
+```
+
+## $n$ Simulation
+
+```{r n-results}
+c = 1 # default
+ns = c(1000, 5000, 10000)
+
+outfile = "rds/n_sim.rds"
+
+future::plan(multisession, workers = max(1, parallel::detectCores() - 1))
+
+if (file.exists(outfile)) {
+  res_alpha = readRDS(outfile)
+} else {
+  res_alpha = furrr::future_map2_dfr(
+    alphas, seq_along(alphas),
+    ~{
+      purrr::map_dfr(ns, function(nn) {
+        out = simulate(
+          n = nn, alpha = .x, tau = tau, params = params, B = iters,
+          c = c, seed.offset = seed0 + .y, structure = "ind"
+        )
+        dplyr::mutate(out, alpha = .x, n = nn)
+      })
+    },
+    .options = furrr::furrr_options(seed = TRUE)
+  )
+  saveRDS(res_alpha, outfile)
+}
+
+# tidy
+df = res_alpha %>%
+  dplyr::filter(Method == "FDR_bound") %>%
+  dplyr::mutate(
+    FDP_mcse   = FDP_sd   / sqrt(iters),
+    Power_mcse = Power_sd / sqrt(iters)
+  )
+```
+
+```{r n-plot}
+# prep: keep only FDR_bound rows & add factor for n
+df_n = res_alpha %>%
+  filter(Method == "FDR_bound") %>%
+  mutate(
+    FDP_mcse   = FDP_sd   / sqrt(iters),
+    Power_mcse = Power_sd / sqrt(iters),
+    n_f = factor(
+      n,
+      levels = sort(unique(n)),
+      labels = paste0("n = ", sort(unique(n)))
+    )
+  )
+
+df_n_zoomed = subset(df_n, alpha <= 0.25)
+
+# 3-color palette for the three n levels
+n_levels = levels(df_n_zoomed$n_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00")  # blue / green / orange
+cols_n = setNames(base_cols[seq_along(n_levels)], n_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+fdr_n = ggplot(df_n_zoomed, aes(x = alpha, y = FDP_mean, color = n_f, fill = n_f, group = n_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(0, FDP_mean - FDP_mcse),
+        ymax = pmin(1, FDP_mean + FDP_mcse)),
+    alpha = 0.12, color = NA
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 1) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "n", values = cols_n) +
+  scale_fill_manual(name = "n", values = cols_n) +
+  labs(
+    title = "Independent p-values | n Simulations",
+    x = expression(alpha),
+    y = "Empirical FDR",
+    color = "n", fill = "n",
+    subtitle = "FDR vs α"
+  ) +
+  theme_linedraw(base_size = 13) + theme(legend.position = "none")
+
+power_n = ggplot(df_n_zoomed, aes(x = alpha, y = Power_mean, color = n_f, fill = n_f, group = n_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(0, Power_mean - Power_mcse),
+        ymax = pmin(1, Power_mean + Power_mcse)),
+    alpha = 0.12, color = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "n", values = cols_n) +
+  scale_fill_manual(name = "n", values = cols_n) +
+  labs(
+    title = NULL,
+    x = expression(alpha),
+    y = "Power",
+    color = "n", fill = "n",
+    subtitle = "Power vs α"
+  ) +
+  theme_linedraw(base_size = 13)
+
+n_sim = fdr_n + power_n
+n_sim
+```
+
+## $M$ Simulation
+
+Using a different seed from before, now the plot for $M$ looks like this.
+
+```{r B-results}
+n = 1000 # default
+Bs = c(100, 500, 1000)
+seed0 = 188
+
+outfile = "rds/B_sim2.rds"
+
+future::plan(multisession, workers = max(1, parallel::detectCores() - 1))
+
+if (file.exists(outfile)) {
+  res_alpha = readRDS(outfile)
+} else {
+  res_alpha = furrr::future_map2_dfr(
+    alphas, seq_along(alphas),
+    ~{
+      purrr::map_dfr(Bs, function(BB) {
+        out = simulate(
+          n = n, alpha = .x, tau = tau, params = params, B = BB,
+          c = c, seed.offset = seed0 + .y, structure = "ind"
+        )
+        dplyr::mutate(out, alpha = .x, B = BB)
+      })
+    },
+    .options = furrr::furrr_options(seed = TRUE)
+  )
+  saveRDS(res_alpha, outfile)
+}
+
+# tidy
+df = res_alpha %>%
+  dplyr::filter(Method == "FDR_bound") %>%
+  dplyr::mutate(
+    FDP_mcse   = FDP_sd   / sqrt(B),
+    Power_mcse = Power_sd / sqrt(B),
+    B_f = factor(B, levels = Bs, labels = paste0("B = ", Bs))
+  )
+```
+
+```{r B-plot}
+# prep: keep only FDR_bound rows & add factor for B
+df_B = res_alpha %>%
+  filter(Method == "FDR_bound") %>%
+  mutate(
+    FDP_mcse   = FDP_sd   / sqrt(B),
+    Power_mcse = Power_sd / sqrt(B),
+    B_f = factor(
+      B,
+      levels = sort(unique(B)),
+      labels = paste0("B = ", sort(unique(B)))
+    )
+  )
+
+df_B_zoomed = subset(df_B, alpha <= 0.25)
+
+# 3-color palette for the three B levels
+B_levels = levels(df_B_zoomed$B_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00")  # blue / green / orange
+cols_B = setNames(base_cols[seq_along(B_levels)], B_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+fdr_B = ggplot(df_B_zoomed, aes(x = alpha, y = FDP_mean, color = B_f, fill = B_f, group = B_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(0, FDP_mean - FDP_mcse),
+        ymax = pmin(1, FDP_mean + FDP_mcse)),
+    alpha = 0.12, color = NA
+  ) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 1) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "B", values = cols_B) +
+  scale_fill_manual(name = "B", values = cols_B) +
+  labs(
+    title = glue("Empirical FDR over alpha. n = {n}, parameters = {params_txt}, tau = {tau}, c = {c}"),
+    x = expression(alpha),
+    y = "Empirical FDR",
+    color = "B", fill = "B",
+    subtitle = glue("We used Iterations = ({paste(sort(unique(df_B$B)), collapse = ', ')}) for simulation.")
+  ) +
+  theme_linedraw(base_size = 13)
+
+power_B = ggplot(df_B_zoomed, aes(x = alpha, y = Power_mean, color = B_f, fill = B_f, group = B_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(0, Power_mean - Power_mcse),
+        ymax = pmin(1, Power_mean + Power_mcse)),
+    alpha = 0.12, color = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "B", values = cols_B) +
+  scale_fill_manual(name = "B", values = cols_B) +
+  labs(
+    title = glue("Power vs α. n = {n}, parameters = {params_txt}, tau = {tau}, c = {c}"),
+    x = expression(alpha),
+    y = "Power",
+    color = "B", fill = "B",
+    subtitle = glue("We used Iterations = ({paste(sort(unique(df_B$B)), collapse = ', ')}) for simulation.")
+  ) +
+  theme_linedraw(base_size = 13)
+
+fdr_B
+power_B
+```
+
+# FDP, Power and Number of Discoveries
+
+## FDP
+
+```{r FDP}
+B = 100 # default
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+outfile = "rds/power_ntar.rds"
+
+# --- cache or compute ---
+if (file.exists(outfile)) {
+  res_alpha = readRDS(outfile)
+} else {
+  res_alpha = map_dfr(alphas, function(a) {
+    out = simulate(n = n, alpha = a, tau = tau, params = params,
+                   B = B, c = c, seed.offset = seed0, structure = "independent")
+    out %>% mutate(alpha = a)
+  })
+  saveRDS(res_alpha, outfile)
+}
+
+# --- tidy for plotting ---
+cols = c("FDR_bound" = "#009E73",  # green
+         "Storey"    = "#E69F00",  # orange
+         "BH"        = "#56B4E9",  # sky blue
+         "BY"        = "#CC79A7")  # purple
+
+df = res_alpha %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(B),
+    Power_mcse = Power_sd / sqrt(B)
+  )
+
+df = subset(df, alpha <= 0.25)
+
+# --- FDP vs alpha plot (all methods) ---
+p_fdp = ggplot(df, aes(x = alpha, y = FDP_mean, color = Method, fill = Method)) +
+  geom_ribbon(aes(ymin = pmax(0, FDP_mean - FDP_mcse),
+                  ymax = pmin(1, FDP_mean + FDP_mcse)),
+              alpha = 0.12, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
+  labs(
+    title = "Independent Structure",
+    x = expression(alpha),
+    y = "Empirical FDR",
+    color = "Method", fill = "Method", subtitle = "Empirical FDR vs α"
+  ) +
+  theme_linedraw(base_size = 13) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed",
+              linewidth = 0.7, color = "black", alpha = 0.7, show.legend = FALSE) +
+  theme(legend.position = "none")
+
+p_fdp
+```
+
+## Power
+
+```{r power}
+B = 100 # default
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+outfile = "rds/power_ntar.rds"
+
+# --- cache or compute ---
+if (file.exists(outfile)) {
+  res_alpha = readRDS(outfile)
+} else {
+  res_alpha = map_dfr(alphas, function(a) {
+    out = simulate(n = n, alpha = a, tau = tau, params = params,
+                   B = B, c = c, seed.offset = seed0, structure = "independent")
+    out %>% mutate(alpha = a)
+  })
+  saveRDS(res_alpha, outfile)
+}
+
+# --- tidy for plotting ---
+cols = c("FDR_bound" = "#009E73",  # green
+         "Storey"    = "#E69F00",  # orange
+         "BH"        = "#56B4E9",  # sky blue
+         "BY"        = "#CC79A7")  # purple
+
+df = res_alpha %>%
+  mutate(
+    Method     = factor(Method, levels = names(cols)),
+    FDP_mcse   = FDP_sd   / sqrt(B),
+    Power_mcse = Power_sd / sqrt(B)
+  )
+
+df = subset(df, alpha <= 0.25)
+
+# --- Power vs alpha plot (all methods) ---
+p_power = ggplot(df, aes(x = alpha, y = Power_mean, color = Method, fill = Method)) +
+  geom_ribbon(aes(ymin = pmax(0, Power_mean - Power_mcse),
+                  ymax = pmin(1, Power_mean + Power_mcse)),
+              alpha = 0.12, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
+  labs(
+    title = "Independent Structure",
+    x = expression(alpha),
+    y = "Mean Power",
+    color = "Method", fill = "Method", subtitle = "Power vs α"
+  ) +
+  theme_linedraw(base_size = 13)
+
+p_power
+```
+
+## Number of Discoveries
+
+```{r nT-plot}
+# load cached results if not already present
+if (!exists("res_alpha")) {
+  res_alpha = readRDS("rds/power_ntar.rds")
+}
+
+# palette (same as before)
+cols = c("FDR_bound" = "#009E73",
+         "Storey"    = "#E69F00",
+         "BH"        = "#56B4E9",
+         "BY"        = "#CC79A7")
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+df = res_alpha %>%
+  mutate(
+    Method   = factor(Method, levels = names(cols)),
+    R_mcse   = R_sd / sqrt(B)
+  )
+
+df = subset(df, alpha <= 0.25)
+
+p_disc = ggplot(df, aes(x = alpha, y = R_mean, color = Method, fill = Method)) +
+  geom_ribbon(aes(ymin = pmax(0, R_mean - R_mcse),
+                  ymax = R_mean + R_mcse),
+              alpha = 0.12, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
+  labs(
+    title = glue("# Discoveries vs α. n = {n}, parameters = {params_txt}, tau = {tau}, c = {c}, M = {B}"),
+    x = expression(alpha),
+    y = "Mean # Discoveries",
+    color = "Method", fill = "Method"
+  ) +
+  theme_linedraw(base_size = 13)
+
+p_disc
+```
+
+# Variability of Empirical FDR and Power
+
+## Against $\tau$
+
+```{r}
+res_alpha = readRDS("rds/tau_sim.rds")
+
+df_tau = res_alpha %>%
+  dplyr::filter(Method == "FDR_bound") %>%
+  dplyr::mutate(
+    # MCSEs for the MEANs (already what you had)
+    FDP_mcse_mean   = FDP_sd   / sqrt(iters),
+    Power_mcse_mean = Power_sd / sqrt(iters),
+    # MCSEs for the SDs (delta-method / normal approx)
+    FDP_sd_mcse   = FDP_sd   / sqrt(2 * pmax(iters - 1, 1)),
+    Power_sd_mcse = Power_sd / sqrt(2 * pmax(iters - 1, 1))
+  ) %>%
+  dplyr::mutate(
+    tau_f = factor(
+      tau,
+      levels = sort(unique(tau)),
+      labels = paste0("τ = ", sort(unique(tau)))
+    )
+  )
+
+df_tau = subset(df_tau, alpha <= 0.25)
+
+# Color palette (expand/recycle if needed)
+tau_levels = levels(df_tau$tau_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00")  # blue/green/orange
+cols_tau = setNames(rep(base_cols, length.out = length(tau_levels)), tau_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+# --- FDR SD plot with MCSE ribbon ---
+fdr_tau_var =
+  ggplot(df_tau, aes(x = alpha, y = FDP_sd, color = tau_f)) +
+  # Ribbon for SD ± MCSE(SD)
+  geom_ribbon(
+    aes(ymin = pmax(FDP_sd - FDP_sd_mcse, 0),
+        ymax = FDP_sd + FDP_sd_mcse,
+        fill = tau_f),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "τ", values = cols_tau) +
+  scale_fill_manual(name = "τ", values = cols_tau) +
+  labs(
+    title = glue("FDP SD vs α. n = {n}, parameters = {params_txt}, c = {c}, M = {iters}"),
+    subtitle = glue("τ values: {paste(sort(unique(df_tau$tau)), collapse = ', ')}"),
+    x = expression(alpha),
+    y = "FDP SD"
+  ) +
+  theme_linedraw(base_size = 13)
+
+# --- Power SD plot with MCSE ribbon ---
+power_tau_var =
+  ggplot(df_tau, aes(x = alpha, y = Power_sd, color = tau_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(Power_sd - Power_sd_mcse, 0),
+        ymax = Power_sd + Power_sd_mcse,
+        fill = tau_f),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "τ", values = cols_tau) +
+  scale_fill_manual(name = "τ", values = cols_tau) +
+  labs(
+    title = glue("Power SD vs α. n = {n}, parameters = {params_txt}, c = {c}, M = {iters}"),
+    subtitle = glue("τ values: {paste(sort(unique(df_tau$tau)), collapse = ', ')}"),
+    x = expression(alpha),
+    y = "Power SD"
+  ) +
+  theme_linedraw(base_size = 13)
+
+fdr_tau_var
+power_tau_var
+```
+
+## Against $c$
+
+```{r}
+res_alpha = readRDS("rds/c_sim.rds")
+
+# Prep: keep FDR_bound, compute MCSEs for SDs
+df_c = res_alpha %>%
+  dplyr::filter(Method == "FDR_bound") %>%
+  dplyr::mutate(
+    # MCSEs for SDs (delta method)
+    FDP_sd_mcse   = FDP_sd   / sqrt(2 * pmax(iters - 1, 1)),
+    Power_sd_mcse = Power_sd / sqrt(2 * pmax(iters - 1, 1)),
+    c_f = factor(
+      c,
+      levels = sort(unique(c)),
+      labels = paste0("c = ", sort(unique(c)))
+    )
+  )
+
+# Zoom to small alphas if desired
+df_c_zoomed = subset(df_c, alpha <= 0.25)
+
+# Palette
+c_levels = levels(df_c_zoomed$c_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00", "slateblue")
+cols_c = setNames(rep(base_cols, length.out = length(c_levels)), c_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+# --- FDP SD with MCSE(SD) ribbon ---
+fdr_c_var = ggplot(df_c_zoomed, aes(x = alpha, y = FDP_sd, color = c_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(FDP_sd - FDP_sd_mcse, 0),
+        ymax = FDP_sd + FDP_sd_mcse,
+        fill = c_f),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "c", values = cols_c) +
+  scale_fill_manual(name = "c", values = cols_c) +
+  labs(
+    title = glue("FDP SD vs α. n = {n}, parameters = {params_txt}, τ = {tau}, M = {iters}"),
+    subtitle = "c values: 0, 0.5, 1, 2",
+    x = expression(alpha),
+    y = "FDP SD",
+    color = "c", fill = "c"
+  ) +
+  theme_linedraw(base_size = 13)
+
+# --- Power SD with MCSE(SD) ribbon ---
+power_c_var = ggplot(df_c_zoomed, aes(x = alpha, y = Power_sd, color = c_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(Power_sd - Power_sd_mcse, 0),
+        ymax = Power_sd + Power_sd_mcse,
+        fill = c_f),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "c", values = cols_c) +
+  scale_fill_manual(name = "c", values = cols_c) +
+  labs(
+    title = glue("Power SD vs α. n = {n}, parameters = {params_txt}, τ = {tau}, M = {iters}"),
+    subtitle = "c values: 0, 0.5, 1, 2",
+    x = expression(alpha),
+    y = "Power SD",
+    color = "c", fill = "c"
+  ) +
+  theme_linedraw(base_size = 13)
+
+fdr_c_var
+power_c_var
+```
+
+### Plot against FDR Bound
+
+```{r}
+# read c-sim results
+res_c = readRDS("rds/c_sim.rds")
+
+# keep only the FDR_bound *procedure* rows
+df = res_c %>%
+  filter(Method == "FDR_bound") %>%
+  mutate(
+    # harmonise naming in case your metrics used FDR_mean before renaming to FDR_bound_mean
+    FDRb_mean = dplyr::coalesce(FDR_bound_mean, FDP_mean),
+    FDRb_sd   = dplyr::coalesce(FDR_bound_sd, FDP_sd),  # if you have it; otherwise will be NA
+    FDP_mcse_mean   = FDP_sd   / sqrt(iters),
+    FDRb_mcse_mean  = FDRb_sd  / sqrt(iters),
+    c_f = factor(c, levels = sort(unique(c)), labels = paste0("c = ", sort(unique(c))))
+  )
+
+# zoom (optional)
+dfz = dplyr::filter(df, alpha <= 0.25)
+
+# palette
+c_levels = levels(dfz$c_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00", "slateblue")
+cols_c = setNames(rep(base_cols, length.out = length(c_levels)), c_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+# --- Panel A: FDR_bound (solid) vs FDP (dashed), with MCSE ribbons for means ---
+p_c_bound_vs_fdp =
+  ggplot(dfz, aes(x = alpha, colour = c_f, fill = c_f, group = c_f)) +
+  # FDP mean ribbon
+  geom_ribbon(aes(ymin = pmax(0, FDP_mean - FDP_mcse_mean),
+                  ymax = pmin(1, FDP_mean + FDP_mcse_mean)),
+              alpha = 0.10, colour = NA) +
+  # FDR_bound mean ribbon (only if sd exists)
+  geom_ribbon(aes(ymin = pmax(0, FDRb_mean - FDRb_mcse_mean),
+                  ymax = pmin(1, FDRb_mean + FDRb_mcse_mean)),
+              alpha = 0.10, colour = NA, inherit.aes = TRUE, show.legend = FALSE,
+              data = ~subset(., !is.na(FDRb_mcse_mean))) +
+  # lines
+  geom_line(aes(y = FDRb_mean), linewidth = 1) +
+  geom_line(aes(y = FDP_mean), linewidth = 1, linetype = "dashed") +
+  scale_color_manual(values = cols_c, name = "c") +
+  scale_fill_manual(values = cols_c,  name = "c") +
+  labs(
+    title = glue("FDR_bound vs FDP over α. n = {n}, params = {params_txt}, τ = {tau}, M = {iters}"),
+    subtitle = "Zoom: α ≤ 0.25 • Ribbons show MCSE of the mean",
+    x = expression(alpha), y = "Rate"
+  ) +
+  theme_linedraw(base_size = 13) +
+  facet_wrap(~ c_f)
+
+# --- Panel B: Gap = mean(FDR_bound) − mean(FDP) (want ≥ 0 on average) ---
+df_gap = dfz %>%
+  mutate(
+    gap = FDRb_mean - FDP_mean,
+    gap_mcse = sqrt(FDRb_mcse_mean^2 + FDP_mcse_mean^2)  # independent-reps approximation
+  )
+
+p_c_gap =
+  ggplot(df_gap, aes(x = alpha, y = gap, colour = c_f, fill = c_f)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_ribbon(aes(ymin = gap - gap_mcse, ymax = gap + gap_mcse), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols_c, name = "c") +
+  scale_fill_manual(values = cols_c,  name = "c") +
+  labs(
+    title = glue("Gap: FDR_bound − FDP. n = {n}, params = {params_txt}, τ = {tau}, M = {iters}"),
+    subtitle = "Positive values support that the bound exceeds FDP on average",
+    x = expression(alpha), y = "Gap"
+  ) +
+  theme_linedraw(base_size = 13) +
+  facet_wrap(~ c_f)
+
+p_c_bound_vs_fdp
+p_c_gap
+```
+
+It seems that average FDR bound does exceed average FDP. The procedure is not overly conservative: the bound closely tracks the empirical FDP. The gap is small but positive, and grows slightly with $\alpha$. This supports that the FDR bound method achieves its guarantee in expectation, even if FDR control is not enforced replicate by replicate.
+
+We can check using higher simulation count to see if there are still dips.
+
+```{r}
+cs = c(0, 0.5, 1, 2)
+iters = 1000
+seed0 = 123
+
+outfile = "rds/c_sim2.rds"
+future::plan(multisession, workers = max(1, parallel::detectCores() - 1))
+
+if (file.exists(outfile)) {
+  res_alpha = readRDS(outfile)
+} else {
+  res_alpha = furrr::future_map2_dfr(
+    alphas, seq_along(alphas),
+    ~{
+      purrr::map_dfr(cs, function(cc) {
+        out = simulate(
+          n, alpha = .x, tau = tau, params = params, B = iters,
+          c = cc, seed.offset = seed0 + .y, structure = "ind"
+        )
+        dplyr::mutate(out, alpha = .x, c = cc)
+      })
+    },
+    .options = furrr::furrr_options(seed = TRUE)
+  )
+  saveRDS(res_alpha, outfile)
+}
+```
+
+```{r}
+# tidy
+# read c-sim results
+res_c = readRDS("rds/c_sim2.rds")
+
+# keep only the FDR_bound *procedure* rows
+df = res_c %>%
+  filter(Method == "FDR_bound") %>%
+  mutate(
+    # harmonise naming in case your metrics used FDR_mean before renaming to FDR_bound_mean
+    FDRb_mean = dplyr::coalesce(FDR_bound_mean, FDP_mean),
+    FDRb_sd   = dplyr::coalesce(FDR_bound_sd, FDP_sd),  # if you have it; otherwise will be NA
+    FDP_mcse_mean   = FDP_sd   / sqrt(iters),
+    FDRb_mcse_mean  = FDRb_sd  / sqrt(iters),
+    c_f = factor(c, levels = sort(unique(c)), labels = paste0("c = ", sort(unique(c))))
+  )
+
+# zoom (optional)
+dfz = dplyr::filter(df, alpha <= 0.25)
+
+# palette
+c_levels = levels(dfz$c_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00", "slateblue")
+cols_c = setNames(rep(base_cols, length.out = length(c_levels)), c_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+# --- Panel A: FDR_bound (solid) vs FDP (dashed), with MCSE ribbons for means ---
+p_c_bound_vs_fdp =
+  ggplot(dfz, aes(x = alpha, colour = c_f, fill = c_f, group = c_f)) +
+  # FDP mean ribbon
+  geom_ribbon(aes(ymin = pmax(0, FDP_mean - FDP_mcse_mean),
+                  ymax = pmin(1, FDP_mean + FDP_mcse_mean)),
+              alpha = 0.10, colour = NA) +
+  # FDR_bound mean ribbon (only if sd exists)
+  geom_ribbon(aes(ymin = pmax(0, FDRb_mean - FDRb_mcse_mean),
+                  ymax = pmin(1, FDRb_mean + FDRb_mcse_mean)),
+              alpha = 0.10, colour = NA, inherit.aes = TRUE, show.legend = FALSE,
+              data = ~subset(., !is.na(FDRb_mcse_mean))) +
+  # lines
+  geom_line(aes(y = FDRb_mean), linewidth = 1) +
+  geom_line(aes(y = FDP_mean), linewidth = 1, linetype = "dashed") +
+  scale_color_manual(values = cols_c, name = "c") +
+  scale_fill_manual(values = cols_c,  name = "c") +
+  labs(
+    title = glue("FDR_bound vs FDP over α. n = {n}, params = {params_txt}, τ = {tau}, M = {iters}"),
+    subtitle = "Zoom: α ≤ 0.25 • Ribbons show MCSE of the mean",
+    x = expression(alpha), y = "Rate"
+  ) +
+  theme_linedraw(base_size = 13) +
+  facet_wrap(~ c_f)
+
+# --- Panel B: Gap = mean(FDR_bound) − mean(FDP) (want ≥ 0 on average) ---
+df_gap = dfz %>%
+  mutate(
+    gap = FDRb_mean - FDP_mean,
+    gap_mcse = sqrt(FDRb_mcse_mean^2 + FDP_mcse_mean^2)  # independent-reps approximation
+  )
+
+p_c_gap =
+  ggplot(df_gap, aes(x = alpha, y = gap, colour = c_f, fill = c_f)) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_ribbon(aes(ymin = gap - gap_mcse, ymax = gap + gap_mcse), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = cols_c, name = "c") +
+  scale_fill_manual(values = cols_c,  name = "c") +
+  labs(
+    title = glue("Gap: FDR_bound − FDP. n = {n}, params = {params_txt}, τ = {tau}, M = {iters}"),
+    subtitle = "Positive values support that the bound exceeds FDP on average",
+    x = expression(alpha), y = "Gap"
+  ) +
+  theme_linedraw(base_size = 13) +
+  facet_wrap(~ c_f)
+
+p_c_bound_vs_fdp
+p_c_gap
+
+
+```
+
+## Against $n$
+
+```{r}
+res_alpha = readRDS("rds/n_sim.rds")
+
+df_n = res_alpha %>%
+  filter(Method == "FDR_bound") %>%
+  mutate(
+    # MCSEs for SDs (delta method)
+    FDP_sd_mcse   = FDP_sd   / sqrt(2 * pmax(iters - 1, 1)),
+    Power_sd_mcse = Power_sd / sqrt(2 * pmax(iters - 1, 1)),
+    n_f = factor(
+      n,
+      levels = sort(unique(n)),
+      labels = paste0("n = ", sort(unique(n)))
+    )
+  )
+
+# zoom (note: alpha is lowercase)
+df_n_zoomed = subset(df_n, alpha <= 0.25)
+
+# palette
+n_levels = levels(df_n_zoomed$n_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00")
+cols_n = setNames(rep(base_cols, length.out = length(n_levels)), n_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+# --- FDP SD with MCSE(SD) ribbon ---
+fdr_n_var = ggplot(df_n_zoomed, aes(x = alpha, y = FDP_sd, color = n_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(FDP_sd - FDP_sd_mcse, 0),
+        ymax = FDP_sd + FDP_sd_mcse,
+        fill = n_f),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "n", values = cols_n) +
+  scale_fill_manual(name = "n", values = cols_n) +
+  labs(
+    title = glue("FDP SD vs α. parameters = {params_txt}, τ = {tau}, c = {c}, M = {iters}"),
+    subtitle = glue("n values: {paste(sort(unique(df_n$n)), collapse = ', ')} (zoomed to α ≤ 0.25)"),
+    x = expression(alpha),
+    y = "FDP SD",
+    color = "n", fill = "n"
+  ) +
+  theme_linedraw(base_size = 13)
+
+# --- Power SD with MCSE(SD) ribbon ---
+power_n_var = ggplot(df_n_zoomed, aes(x = alpha, y = Power_sd, color = n_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(Power_sd - Power_sd_mcse, 0),
+        ymax = Power_sd + Power_sd_mcse,
+        fill = n_f),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "n", values = cols_n) +
+  scale_fill_manual(name = "n", values = cols_n) +
+  labs(
+    title = glue("Power SD vs α. parameters = {params_txt}, τ = {tau}, c = {c}, M = {iters}"),
+    subtitle = glue("n values: {paste(sort(unique(df_n$n)), collapse = ', ')} (zoomed to α ≤ 0.25)"),
+    x = expression(alpha),
+    y = "Power SD",
+    color = "n", fill = "n"
+  ) +
+  theme_linedraw(base_size = 13)
+
+fdr_n_var
+power_n_var
+```
+
+## Against $B$
+
+```{r}
+res_alpha = readRDS("rds/B_sim.rds")
+
+# Keep FDR_bound, compute MCSEs for SDs (delta method), and factor for B
+df_B = res_alpha %>%
+  filter(Method == "FDR_bound") %>%
+  mutate(
+    FDP_sd_mcse   = FDP_sd   / sqrt(2 * pmax(B - 1, 1)),
+    Power_sd_mcse = Power_sd / sqrt(2 * pmax(B - 1, 1)),
+    B_f = factor(
+      B,
+      levels = sort(unique(B)),
+      labels = paste0("B = ", sort(unique(B)))
+    )
+  )
+
+# zoom to α ≤ 0.25 (use df_B for full range)
+df_B_zoomed = subset(df_B, alpha <= 0.25)
+
+# palette
+B_levels = levels(df_B_zoomed$B_f)
+base_cols = c("#0072B2", "#009E73", "#D55E00")
+cols_B = setNames(rep(base_cols, length.out = length(B_levels)), B_levels)
+
+params_txt = paste0("(", paste(params, collapse = ", "), ")")
+
+# --- FDP SD with MCSE(SD) ribbon ---
+fdr_B_var = ggplot(df_B_zoomed, aes(x = alpha, y = FDP_sd, color = B_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(FDP_sd - FDP_sd_mcse, 0),
+        ymax = FDP_sd + FDP_sd_mcse,
+        fill = B_f),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "B", values = cols_B) +
+  scale_fill_manual(name = "B", values = cols_B) +
+  labs(
+    title = glue("FDP SD vs α. n = {n}, parameters = {params_txt}, τ = {tau}, c = {c}"),
+    subtitle = glue("M = {paste(sort(unique(df_B$B)), collapse = ', ')}"),
+    x = expression(alpha),
+    y = "FDP SD",
+    color = "B", fill = "B"
+  ) +
+  theme_linedraw(base_size = 13)
+
+# --- Power SD with MCSE(SD) ribbon ---
+power_B_var = ggplot(df_B_zoomed, aes(x = alpha, y = Power_sd, color = B_f)) +
+  geom_ribbon(
+    aes(ymin = pmax(Power_sd - Power_sd_mcse, 0),
+        ymax = Power_sd + Power_sd_mcse,
+        fill = B_f),
+    alpha = 0.15, colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(name = "B", values = cols_B) +
+  scale_fill_manual(name = "B", values = cols_B) +
+  labs(
+    title = glue("Power SD vs α. n = {n}, parameters = {params_txt}, τ = {tau}, c = {c}"),
+    subtitle = glue("M = {paste(sort(unique(df_B$B)), collapse = ', ')}"),
+    x = expression(alpha),
+    y = "Power SD",
+    color = "B", fill = "B"
+  ) +
+  theme_linedraw(base_size = 13)
+
+fdr_B_var
+power_B_var
+```
