@@ -1,4 +1,4 @@
-# LLeveraging the Target-Decoy Competition Setup to Bound the False Discovery Rate with Dependent p-values
+# Leveraging the Target-Decoy Competition Setup to Bound the False Discovery Rate with Dependent p-values
 This repository contains the code for my research project in the unit SCDL3992 (Science Dalyell Individual Research Project). The project develops a Target–Decoy Competition–based procedure for providing an upper bound on the False Discovery Rate (FDR) under dependent true-null p-values.
 
 ## Contents
